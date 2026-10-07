@@ -33,11 +33,33 @@ def parent_p(el):
     return el
 
 
+def strip_links(body) -> int:
+    """Remove this script's earlier links and bookmarks so numbering is rebuilt from the
+    CURRENT bibliography (a Zotero refresh can renumber entries and leave old links stale)."""
+    n = 0
+    for h in list(body.iter(qn("w:hyperlink"))):
+        if (h.get(qn("w:anchor")) or "").startswith(BM_PREFIX):
+            par = h.getparent()
+            for child in list(h):
+                h.addprevious(child)
+            par.remove(h)
+            n += 1
+    for b in list(body.iter(qn("w:bookmarkStart"))):
+        if (b.get(qn("w:name")) or "").startswith(BM_PREFIX):
+            bid = b.get(qn("w:id"))
+            for e in list(body.iter(qn("w:bookmarkEnd"))):
+                if e.get(qn("w:id")) == bid:
+                    e.getparent().remove(e)
+            b.getparent().remove(b)
+    return n
+
+
 def scan(body):
     """Walk runs in document order, tracking nested fields. Returns
     (citation result runs, bibliography paragraphs)."""
-    stack = []                     # [kind, code, in_result]
-    cite_runs, bib_paras = [], []
+    stack = []                     # [kind, code, in_result, group_id]
+    cite_runs, bib_paras = [], []   # cite_runs: [(run, group_id)] - one group per citation field
+    gid = 0
     for p in body.iter(qn("w:p")):
         in_bib = any(f[0] == "bib" and f[2] for f in stack)
         for r in p.iter(qn("w:r")):
@@ -48,7 +70,8 @@ def scan(body):
             if fc is not None:
                 kind = fc.get(qn("w:fldCharType"))
                 if kind == "begin":
-                    stack.append(["?", "", False])
+                    gid += 1
+                    stack.append(["?", "", False, gid])
                 elif kind == "separate" and stack:
                     code = stack[-1][1]
                     stack[-1][0] = "cite" if "ZOTERO_ITEM" in code else "bib" if "ZOTERO_BIBL" in code else "other"
@@ -61,7 +84,7 @@ def scan(body):
                 continue
             if stack and stack[-1][2]:
                 if stack[-1][0] == "cite" and r.getparent() is p:
-                    cite_runs.append(r)
+                    cite_runs.append((r, stack[-1][3]))
                 if stack[-1][0] == "bib":
                     in_bib = True
         if in_bib:
@@ -187,7 +210,8 @@ def ay_entries(body, bib_paras) -> dict[int, tuple[str, str]]:
 
 def ay_lookup(entries, name_text: str, year: str):
     name = LEAD_RE.sub("", name_text).strip().rstrip(",").strip()
-    name = re.split(r"\s+et\s+al\b|\s+&\s+|\s+and\s+|,", name, 1)[0]
+    name = re.sub(r"^(?:[A-Z]\.\s*)+", "", name)             # "B. W. Corrigan" -> "Corrigan"
+    name = re.split(r"\s+et\s+al\b|\s+&\s+|\s+and\s+|,", name, maxsplit=1)[0]
     key = norm(name)
     if not key:
         return None
@@ -199,43 +223,88 @@ def ay_lookup(entries, name_text: str, year: str):
     return cands[0] if cands else None
 
 
+NARR_RE = re.compile(r"([A-Z][\w\-'’]+(?:\s+et\s+al\.?|\s+(?:&|and)\s+[A-Z][\w\-'’]+)?)\s*$")
+
+
+def preceding_text(first_run) -> str:
+    """Text of the paragraph before the first run of a citation (for narrative 'Liu et al. (2022)')."""
+    p = parent_p(first_run)
+    out = []
+    for t in p.iter(qn("w:t")):
+        if first_run in t.iterancestors():
+            break
+        out.append(t.text or "")
+    return "".join(out)
+
+
 def link_citations_ay(cite_runs, entries, blue) -> tuple[int, list[str]]:
+    """Link per citation field, not per run: Zotero/Word often split one citation
+    ('(Karlocai' | ' et al., 2014; ') across runs."""
+    groups: dict[int, list] = {}
+    for r, g in cite_runs:
+        groups.setdefault(g, []).append(r)
     linked, missing = 0, []
-    for r in cite_runs:
-        ts = r.findall(qn("w:t"))
-        if not ts or len(r) - (r.find(qn("w:rPr")) is not None) != len(ts):
-            continue
-        text = "".join(t.text or "" for t in ts)
-        spans = []                                           # (start, end, entry number)
-        for m in CITE_YEAR_RE.finditer(text):
-            seg = max(text.rfind(";", 0, m.start()), text.rfind("(", 0, m.start())) + 1
-            seg_text = text[seg:m.start()]
-            n = ay_lookup(entries, seg_text, m.group(1))
-            lead = len(seg_text) - len(seg_text.lstrip())
-            if n is None:
-                if seg_text.strip():
-                    missing.append(f"{seg_text.strip().rstrip(',')} {m.group(1)}")
+    for runs in groups.values():
+        items = []                                          # (run, text, offset)
+        pos = 0
+        for r in runs:
+            ts = r.findall(qn("w:t"))
+            if not ts or len(r) - (r.find(qn("w:rPr")) is not None) != len(ts):
                 continue
-            spans.append((seg + lead, m.end(), n))
+            text = "".join(t.text or "" for t in ts)
+            items.append((r, text, pos))
+            pos += len(text)
+        if not items:
+            continue
+        full = "".join(t for _, t, _ in items)
+        spans = []                                          # (start, end, entry number)
+        for m in CITE_YEAR_RE.finditer(full):
+            seg = max(full.rfind(";", 0, m.start()), full.rfind("(", 0, m.start())) + 1
+            seg_text = full[seg:m.start()]
+            lead = len(seg_text) - len(seg_text.lstrip())
+            name_text, start = seg_text, seg + lead
+            if not seg_text.strip() and full[:m.start()].strip() in ("", "("):
+                nm = NARR_RE.search(preceding_text(items[0][0]).rstrip())   # narrative: Name et al. (2022)
+                if nm:
+                    name_text, start = nm.group(1), m.start()
+            n = ay_lookup(entries, name_text, m.group(1))
+            if n is None:
+                if name_text.strip():
+                    missing.append(f"{name_text.strip().rstrip(',')} {m.group(1)}")
+                continue
+            spans.append((start, m.end(), n))
         if not spans:
             continue
-        rpr = r.find(qn("w:rPr"))
-        new, pos = [], 0
-        for s, e, n in spans:
-            if s > pos:
-                new.append(make_run(rpr, text[pos:s], False))
-            h = OxmlElement("w:hyperlink")
-            h.set(qn("w:anchor"), f"{BM_PREFIX}{n}")
-            h.set(qn("w:history"), "1")
-            h.append(make_run(rpr, text[s:e], blue))
-            new.append(h)
-            linked += 1
-            pos = e
-        if pos < len(text):
-            new.append(make_run(rpr, text[pos:], False))
-        for el in reversed(new):
-            r.addnext(el)
-        r.getparent().remove(r)
+        for r, text, off in items:
+            lo, hi = off, off + len(text)
+            pieces, cur = [], 0                              # (text, entry number | None)
+            for s0, e0, n in spans:
+                a0, b0 = max(s0, lo) - lo, min(e0, hi) - lo
+                if a0 >= b0:
+                    continue
+                if a0 > cur:
+                    pieces.append((text[cur:a0], None))
+                pieces.append((text[a0:b0], n))
+                cur = b0
+            if not pieces:
+                continue
+            if cur < len(text):
+                pieces.append((text[cur:], None))
+            rpr = r.find(qn("w:rPr"))
+            new = []
+            for t_, n in pieces:
+                if n is None:
+                    new.append(make_run(rpr, t_, False))
+                else:
+                    h = OxmlElement("w:hyperlink")
+                    h.set(qn("w:anchor"), f"{BM_PREFIX}{n}")
+                    h.set(qn("w:history"), "1")
+                    h.append(make_run(rpr, t_, blue))
+                    new.append(h)
+                    linked += 1
+            for el in reversed(new):
+                r.addnext(el)
+            r.getparent().remove(r)
     return linked, missing
 
 
@@ -255,16 +324,17 @@ def main():
     ap.add_argument("-o", "--output")
     ap.add_argument("--blue", action="store_true", help="colour the linked numbers blue + underline")
     a = ap.parse_args()
-    out = a.output or re.sub(r"\.docx$", "", a.docx) + "_linked.docx"
+    out = a.output or re.sub(r"(_linked)?\.docx$", "", a.docx) + "_linked.docx"
 
     doc = Document(a.docx)
     body = doc.element.body
+    strip_links(body)
     cite_runs, bib_paras = scan(body)
     if not bib_paras:
         sys.exit("No Zotero bibliography found — insert one (Zotero → Add/Edit Bibliography) and Refresh first.")
     if is_numbered(bib_paras):
         numbers = add_bookmarks(body, bib_paras)
-        linked, missing = link_citations(cite_runs, numbers, a.blue)
+        linked, missing = link_citations([r for r, _ in cite_runs], numbers, a.blue)
         count, what = len(numbers), "citation numbers"
         missing_msg = "Numbers with no matching reference entry (left unlinked): "
         missing = sorted(set(missing))
@@ -279,7 +349,7 @@ def main():
     doc.save(out)
 
     print(f"{count} reference entries bookmarked, {linked} {what} linked"
-          + (" (none new — already linked)." if not linked else "."))
+          + ".")
     if missing:
         print(f"{missing_msg}{missing}")
     print(f"Saved → {out}\nNot linked? Zotero → Refresh drops the links; just re-run this afterwards.")

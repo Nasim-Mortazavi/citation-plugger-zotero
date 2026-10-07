@@ -69,8 +69,8 @@ tool — nothing is guessed or silently mis-linked.
 `link_selected_citation.bat` is a Windows shortcut for this; set the `ZOTERO_USER_ID`
 environment variable first (it is used if present).
 
-## Make numbered citations clickable
-For numbered styles (Nature, IEEE, Vancouver, ...), `zotero_hyperlinks.py` makes each
+## Make citations clickable
+For numbered styles (Nature, IEEE, Vancouver, ...) and author-year styles (APA, Harvard, ...), `zotero_hyperlinks.py` makes each
 number jump to its entry in the reference list, in Word and in the exported PDF.
 ```bash
 python zotero_hyperlinks.py paper.docx          # -> paper_linked.docx
@@ -78,6 +78,9 @@ python zotero_hyperlinks.py paper.docx --blue   # also show links blue/underline
 ```
 Zotero → Refresh drops these links, so run it as the **last** step, after the final
 Refresh and just before exporting the PDF. Running it again is safe.
+
+To double-check the result, `python verify_links.py paper_linked.docx` confirms every
+link points at the matching reference-list entry.
 
 ## Examples
 `examples/` holds a small synthetic Word file with typed citations and its converted
