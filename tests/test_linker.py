@@ -103,6 +103,53 @@ def test_document():
         assert Document(dst2).element.xml.count("ZOTERO_ITEM CSL_CITATION") == n_fields
 
 
+def test_uri_and_user_id_warning():
+    import io, contextlib
+    raw = {"key": "K1", "data": {"title": "T", "date": "2020", "creators": []}, "csljson": {}, "library": {"id": 1}}
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        c = zl.ZoteroClient(False, None, None, None, 23119)
+    assert "--user-id" in err.getvalue(), "must warn when no user id"
+    assert c._to_item(raw).uri == "http://zotero.org/users/local/zlinker0/items/K1"   # not users/1
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        c2 = zl.ZoteroClient(False, "999", None, None, 23119)
+        zl.ZoteroClient(True, "999", None, "key", 23119)
+    assert err.getvalue() == "", "no warning when the id is given"
+    assert c2._to_item(raw).uri == "http://zotero.org/users/999/items/K1"
+
+
+def test_existing_bibliography_marker():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = os.path.join(tmp, "in.docx"), os.path.join(tmp, "out.docx")
+        d = Document()
+        d.add_paragraph("Text (Moore, 1999).")
+        d.add_paragraph("[[bibliography]]")                       # marker alone -> paragraph removed
+        d.add_paragraph("Keep this [[Bibliography]] tail")         # marker + text -> text kept
+        d.add_paragraph("Last [[bibliography]]")
+        d.save(src)
+        # first run: no bibliography yet -> the first marker becomes the field, later ones are dropped
+        zl.process(src, dst, resolver(), "apa", "en-US", False)
+        out = Document(dst)
+        xml = out.element.xml
+        assert xml.count("ZOTERO_BIBL") == 1
+        texts = [para_text(p) for p in out.paragraphs]
+        assert texts[-2:] == ["Keep this  tail", "Last "], texts          # marker removed, surrounding text kept
+        assert "" not in texts[1:2] and len(texts) == 4, texts            # lone-marker paragraph became the bibliography field
+
+        # document that already has a bibliography field: marker text removed, field untouched
+        d = Document(dst)
+        d.add_paragraph("Extra [[bibliography]] marker")
+        d.add_paragraph("[[bibliography]]")
+        src2, dst2 = os.path.join(tmp, "in2.docx"), os.path.join(tmp, "out2.docx")
+        d.save(src2)
+        zl.process(src2, dst2, resolver(), None, "en-US", False)
+        out2 = Document(dst2)
+        assert out2.element.xml.count("ZOTERO_BIBL") == 1
+        assert all("[[" not in para_text(p) for p in out2.paragraphs)
+        assert len(out2.paragraphs) == len(out.paragraphs) + 1     # "Extra ..." kept, lone marker paragraph gone
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -85,6 +85,10 @@ Refresh and just before exporting the PDF. Running it again is safe.
 To double-check the result, `python verify_links.py paper_linked.docx` confirms every
 link points at the matching reference-list entry.
 
+Without a user ID the tool prints a warning and the fields use a local placeholder library;
+Zotero then asks to re-link the items on the first Refresh. If the document already has a
+bibliography, a leftover `[[bibliography]]` marker is removed (a note is printed).
+
 Limitations of the linker: the match is strict about author count (`Lee, 2024` will not match a
 two-author item), surnames with lowercase particles such as `van der Berg` are not recognised
 in typed citations, `2020a`/`2020b` both resolve to the first matching item, and citations in

@@ -110,6 +110,9 @@ class Item:
         return f"{who} ({self.year}) — {self.title[:70]}"
 
 
+LOCAL_KEY = "zlinker0"        # stands in for the user id when none is given (Zotero re-links on Refresh)
+
+
 class ZoteroClient:
     def __init__(self, web: bool, user_id, group_id, api_key, port: int):
         self.web = web
@@ -128,7 +131,11 @@ class ZoteroClient:
         else:
             self.base = f"http://localhost:{port}/api/users/0"
         self.cache: dict[str, Item] = {}
-        self.local_user_key: Optional[str] = None
+        self.local_user_key = LOCAL_KEY
+        if not web and not user_id and not group_id:
+            print("WARNING: no --user-id (or ZOTERO_USER_ID) given. The citations will still work, but "
+                  "Zotero will ask you to re-link the items on the first Refresh. "
+                  "Find your ID at https://www.zotero.org/settings/keys", file=sys.stderr)
 
     def _get(self, path, **params):
         params.setdefault("include", "data,csljson")
@@ -150,16 +157,12 @@ class ZoteroClient:
         if isinstance(csl_raw, list):
             csl_raw = csl_raw[0] if csl_raw else {}
         csl = dict(csl_raw)
-        lib = raw.get("library", {})
-        lib_id = lib.get("id")
         if self.group_id:
             uri = f"http://zotero.org/groups/{self.group_id}/items/{raw['key']}"
         elif self.user_id:
             uri = f"http://zotero.org/users/{self.user_id}/items/{raw['key']}"
-        elif lib_id:
-            uri = f"http://zotero.org/users/{lib_id}/items/{raw['key']}"
-        else:
-            uri = f"http://zotero.org/users/local/{self.local_user_key or 'unknown'}/items/{raw['key']}"
+        else:                                          # Zotero's own form for an unsynced/unknown library
+            uri = f"http://zotero.org/users/local/{self.local_user_key}/items/{raw['key']}"
         csl["id"] = raw["key"]
         creators = data.get("creators", [])
         # cite by authors; translators, series editors etc. must not change the author count
@@ -367,6 +370,21 @@ def plain_groups(p: Paragraph, inside: set) -> list[list]:
     return groups
 
 
+def drop_bib_marker(p: Paragraph) -> None:
+    """The document already has a bibliography, so a [[bibliography]] marker is just leftover
+    text: remove it (and its paragraph if nothing else is in it). Fields are never touched."""
+    if p._p.find(".//" + qn("w:fldChar")) is not None:
+        print("Note: left a [[bibliography]] marker next to a field untouched — remove it by hand.")
+        return
+    merge_runs(p)
+    cleaned = BIB_RE.sub("", p.text)
+    if cleaned.strip():
+        p.runs[0].text = cleaned
+    else:
+        p._p.getparent().remove(p._p)
+    print("Removed a [[bibliography]] marker (the document already has a bibliography).")
+
+
 def merge_split_citations(group: list, pattern) -> None:
     """Where Word split a citation over several runs, merge just those runs
     (the rest of the paragraph and its formatting is left alone)."""
@@ -493,6 +511,9 @@ def process(src, dst, resolver: Resolver, style: str, locale: str, dry_run: bool
             if after.strip():
                 p._p.append(_run(rpr, text=after))
             bib_done = True
+            continue
+        if BIB_RE.search(p.text):                   # a bibliography already exists: no second one
+            drop_bib_marker(p)
             continue
         if not any_pattern.search(p.text):
             continue
