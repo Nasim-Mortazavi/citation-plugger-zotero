@@ -36,6 +36,9 @@ Nasim et al. (2026)            ← narrative: author text kept, year becomes the
 [[cite: any free-text query]]  ← optional explicit placeholder
 ```
 Matching checks first-author surname + year (+ co-author / "et al." consistency).
+Also `(Smith, in press)`, `(Smith, n.d.)` and `(Smith, forthcoming)`. Accents are ignored when
+matching (`Muller` finds `Müller`). Authors are matched against the item's *author* creators
+(editors if there are none), so translators etc. don't break the match.
 Citations it can't find stay as plain text and are listed at the end of the run,
 so nothing is lost. Run it on a copy — the output is a new file.
 
@@ -82,13 +85,20 @@ Refresh and just before exporting the PDF. Running it again is safe.
 To double-check the result, `python verify_links.py paper_linked.docx` confirms every
 link points at the matching reference-list entry.
 
-Limitations: only the document body is processed (citations inside footnotes, headers or
+Limitations of the linker: the match is strict about author count (`Lee, 2024` will not match a
+two-author item), surnames with lowercase particles such as `van der Berg` are not recognised
+in typed citations, `2020a`/`2020b` both resolve to the first matching item, and citations in
+footnotes are not converted. Live mode refuses a selection that contains fields or hidden text
+(positions would not line up) — select just the plain typed citation.
+
+Limitations of the hyperlinker: only the document body is processed (citations inside footnotes, headers or
 text boxes are left alone), and an ambiguous author-year match (e.g. two `Smith 2020a`
 entries cited as `Smith 2020`) links to the first one.
 
 ## Tests
-`python tests/test_hyperlinks.py` builds small synthetic Zotero documents and checks that
-linking keeps the text intact, links the right entries and is safe to re-run.
+`python tests/test_hyperlinks.py` and `python tests/test_linker.py` build small synthetic documents
+(the latter with a fake Zotero) and check that text stays intact, the right entries are linked
+and re-running is safe. No Zotero or Word needed.
 
 ## Examples
 `examples/` holds a small synthetic Word file with typed citations and its converted

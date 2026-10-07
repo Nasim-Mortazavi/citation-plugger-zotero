@@ -37,6 +37,7 @@ import random
 import re
 import string
 import sys
+import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from typing import Optional
@@ -83,7 +84,7 @@ def parse_part(s: str) -> Optional[Part]:
     etal = bool(re.search(r"\bet\s+al", authors))
     names = re.sub(r"\bet\s+al\.?", "", authors)
     surnames = [n.strip() for n in re.split(r"\s*(?:&|,|\band\b)\s*", names) if n.strip()]
-    p = Part(s.strip(), surnames, etal, re.sub(r"[a-z]$", "", year), prefix=prefix)
+    p = Part(s.strip(), surnames, etal, re.sub(r"(?<=\d)[a-z]$", "", year), prefix=prefix)   # 2020a -> 2020; keep "in press"
     lm = LOC_RE.search(tail)
     if lm:
         lab = lm.group(1).lower()
@@ -160,22 +161,25 @@ class ZoteroClient:
         else:
             uri = f"http://zotero.org/users/local/{self.local_user_key or 'unknown'}/items/{raw['key']}"
         csl["id"] = raw["key"]
-        last = [c.get("lastName") or c.get("name", "") for c in data.get("creators", [])
-                if c.get("creatorType") in ("author", "editor", None) or True]
+        creators = data.get("creators", [])
+        # cite by authors; translators, series editors etc. must not change the author count
+        by = [c for c in creators if c.get("creatorType") == "author"]             or [c for c in creators if c.get("creatorType") == "editor"] or creators
+        last = [c.get("lastName") or c.get("name", "") for c in by]
         m = re.search(r"\d{4}", data.get("date", ""))
         return Item(raw["key"], uri, csl, data.get("title", ""), last, m.group(0) if m else "")
 
-    def search(self, query: str, limit=10) -> list[Item]:
-        raws = self._get("/items", q=query, qmode="titleCreatorYear",
-                         itemType="-attachment || note", limit=limit)
-        items = [self._to_item(r) for r in raws]
+    def search(self, query: str, limit=50) -> list[Item]:
+        # Zotero cannot exclude attachments AND notes in one itemType filter, so drop notes here
+        raws = self._get("/items", q=query, qmode="titleCreatorYear", itemType="-attachment", limit=limit)
+        items = [self._to_item(r) for r in raws if r.get("data", {}).get("itemType") not in ("note", "attachment", "annotation")]
         for it in items:
             self.cache[it.key] = it
         return items
 
 
 def norm(s: str) -> str:
-    return re.sub(r"[^a-z]", "", s.lower().replace("’", "'"))
+    """Letters only, accents folded: 'Müller' == 'Muller'."""
+    return re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", s.replace("’", "'")).lower())
 
 
 # ----------------------------------------------------------------------------- #
@@ -194,7 +198,7 @@ class Resolver:
         sig = f"{'|'.join(map(norm, p.surnames))}|{p.etal}|{p.year}"
         if sig in self.decided:
             return self.decided[sig]
-        hits = self.client.search(f"{p.surnames[0]} {p.year}")
+        hits = self.client.search(f"{p.surnames[0]} {p.year}" if p.year[:1].isdigit() else p.surnames[0])
         good = [h for h in hits if self._fits(p, h)]
         item = self._pick(p, good, strict=True) if good else None
         self.decided[sig] = item
@@ -219,7 +223,10 @@ class Resolver:
 
     @staticmethod
     def _fits(p: Part, it: Item) -> bool:
-        if it.year != p.year and p.year not in ("n.d.", "in press", "forthcoming"):
+        if p.year == "n.d.":
+            if it.year:                                  # "n.d." only fits an undated item
+                return False
+        elif p.year not in ("in press", "forthcoming") and it.year != p.year:
             return False
         ln = [norm(x) for x in it.lastnames]
         want = [norm(x) for x in p.surnames]
@@ -304,8 +311,13 @@ def bib_field_runs(rpr):
 # Document rewriting
 # ----------------------------------------------------------------------------- #
 def iter_paragraphs(doc):
+    seen = set()                                   # linked headers/footers are shared between sections
+
     def walk(c):
         for p in c.paragraphs:
+            if id(p._p) in seen:
+                continue
+            seen.add(id(p._p))
             yield p
         for t in c.tables:
             for row in t.rows:
@@ -400,6 +412,8 @@ def find_events(text: str, resolver: Resolver, stats: dict) -> list[tuple[int, i
     for m in PLACEHOLDER_RE.finditer(text):
         parts = []
         for q in m.group(1).split(";"):
+            if not q.strip():
+                continue
             it = resolver.resolve_query(q.strip())
             if it:
                 parts.append((it, Part(q, [], False, "")))
@@ -434,15 +448,23 @@ def find_events(text: str, resolver: Resolver, stats: dict) -> list[tuple[int, i
     return events
 
 
+def non_overlapping(events):
+    """Sorted events minus any that overlap an earlier one (e.g. a placeholder inside a citation)."""
+    out, pos = [], 0
+    for ev in sorted(events):
+        if ev[0] >= pos:
+            out.append(ev)
+            pos = ev[1]
+    return out
+
+
 def build_segments(text: str, resolver: Resolver, stats: dict) -> Optional[list]:
     """Scan text; return docx-run segments or None if nothing to change."""
-    events = find_events(text, resolver, stats)
+    events = non_overlapping(find_events(text, resolver, stats))
     if not events:
         return None
     segs, pos = [], 0
     for s, e, code, disp in events:
-        if s < pos:
-            continue
         segs.append(("text", text[pos:s]))
         segs.append(("field", code, disp))
         pos = e
@@ -457,15 +479,19 @@ def process(src, dst, resolver: Resolver, style: str, locale: str, dry_run: bool
     bib_done = "ZOTERO_BIBL" in doc.element.xml      # document already has a Zotero bibliography
     if bib_done:
         print("Existing Zotero bibliography found — new references will be added to it.")
-    any_pattern = re.compile("|".join(x.pattern for x in (PAREN_RE, NARRATIVE_RE, PLACEHOLDER_RE)))
+    any_pattern = re.compile("|".join((PAREN_RE.pattern, NARRATIVE_RE.pattern, f"(?i:{PLACEHOLDER_RE.pattern})")))
     inside = runs_in_fields(doc)
 
     for p in iter_paragraphs(doc):
         if BIB_RE.search(p.text) and not bib_done:
             merge_runs(p)
-            rewrite_run(p.runs[0], [("text", BIB_RE.split(p.text)[0])])
+            before, after = BIB_RE.split(p.text, maxsplit=1)
+            rpr = p.runs[0]._r.find(qn("w:rPr"))
+            rewrite_run(p.runs[0], [("text", before)])
             for r in bib_field_runs(None):
                 p._p.append(r)
+            if after.strip():
+                p._p.append(_run(rpr, text=after))
             bib_done = True
             continue
         if not any_pattern.search(p.text):

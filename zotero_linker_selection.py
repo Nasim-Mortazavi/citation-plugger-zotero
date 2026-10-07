@@ -36,7 +36,7 @@ try:
 except ImportError:
     sys.exit("This script needs pywin32: pip install pywin32")
 
-from zotero_linker import ZoteroClient, Resolver, find_events
+from zotero_linker import ZoteroClient, Resolver, find_events, non_overlapping
 
 WD_SELECTION_IP = 1        # Word's "just a blinking cursor, nothing selected" constant
 
@@ -100,7 +100,7 @@ def main():
     client = ZoteroClient(a.web, a.user_id, a.group_id, a.api_key, a.port)
     resolver = Resolver(client, a.interactive)
     stats = {"fields": 0, "partial": 0}
-    events = find_events(text, resolver, stats)
+    events = non_overlapping(find_events(text, resolver, stats))
 
     print("Citations:\n" + ("\n".join(resolver.log) if resolver.log else "  (none recognised in the selection)"))
 
@@ -111,6 +111,15 @@ def main():
     if a.dry_run:
         print(f"\n--dry-run: {len(events)} citation(s) would be inserted, Word left unchanged.")
         return
+
+    # Offsets in sel.Text only equal document positions for plain text. Fields (including
+    # existing Zotero citations), objects, deleted tracked text, etc. take up positions that
+    # Text does not show, which would make us replace the wrong characters. Check every
+    # match against the document BEFORE changing anything.
+    for s, e, code, disp in events:
+        if doc.Range(Start=sel_start + s, End=sel_start + e).Text != text[s:e]:
+            sys.exit("The selection contains fields, objects or hidden text, so positions don't line up "
+                     "and nothing was changed. Select just the plain-text citation(s) and try again.")
 
     # Insert fields back-to-front so earlier offsets stay valid as the
     # document's character count shifts with each replacement.
