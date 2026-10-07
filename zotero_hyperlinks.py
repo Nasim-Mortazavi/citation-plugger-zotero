@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-zotero_hyperlinks.py — make numbered Zotero citations (Nature, IEEE, Vancouver, ...)
-clickable: each number jumps to its entry in the reference list, in Word and in
-the exported PDF.
+zotero_hyperlinks.py — make Zotero citations clickable: numbered styles (Nature, IEEE,
+Vancouver, ...) and author-year styles (APA, Harvard, ...). Each citation jumps to its
+entry in the reference list, in Word and in the exported PDF.
 
     python zotero_hyperlinks.py paper.docx               # -> paper_linked.docx
     python zotero_hyperlinks.py paper.docx --blue        # also show links blue/underlined
@@ -120,6 +120,19 @@ def add_bookmarks(body, bib_paras) -> set[int]:
     return numbers
 
 
+_AFTER_COLOR = ("spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
+                "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath")
+
+
+def insert_rpr(rp, el, successors):
+    """Insert el into rPr at its schema position (Word can reject out-of-order children)."""
+    for child in rp:
+        if child.tag in {qn(f"w:{n}") for n in successors}:
+            child.addprevious(el)
+            return
+    rp.append(el)
+
+
 def make_run(rpr, text, blue):
     r = OxmlElement("w:r")
     rp = copy.deepcopy(rpr) if rpr is not None else None
@@ -129,8 +142,8 @@ def make_run(rpr, text, blue):
             old = rp.find(qn(tag))
             if old is not None:
                 rp.remove(old)
-        c = OxmlElement("w:color"); c.set(qn("w:val"), "0563C1"); rp.append(c)
-        u = OxmlElement("w:u"); u.set(qn("w:val"), "single"); rp.append(u)
+        c = OxmlElement("w:color"); c.set(qn("w:val"), "0563C1"); insert_rpr(rp, c, _AFTER_COLOR)
+        u = OxmlElement("w:u"); u.set(qn("w:val"), "single"); insert_rpr(rp, u, _AFTER_COLOR[8:])
     if rp is not None:
         r.append(rp)
     t = OxmlElement("w:t"); t.set(qn("xml:space"), "preserve"); t.text = text
@@ -218,8 +231,11 @@ def ay_lookup(entries, name_text: str, year: str):
     cands = [n for n, (s, y) in entries.items() if s == key and y == year]
     if not cands and year[-1].isdigit():                     # "2020" cites "2020a"
         cands = [n for n, (s, y) in entries.items() if s == key and y[:4] == year]
-    if not cands:
-        cands = [n for n, (s, y) in entries.items() if y == year and (s.startswith(key) or key.startswith(s)) and s]
+    if not cands:                                            # compound surnames ("Berg" vs "van der Berg")
+        cands = [n for n, (s, y) in entries.items() if y == year and min(len(s), len(key)) >= 4
+                 and (s.startswith(key) or key.startswith(s) or s.endswith(key) or key.endswith(s))]
+        if len(cands) != 1:                                  # ambiguous: do not guess
+            return None
     return cands[0] if cands else None
 
 
@@ -258,15 +274,23 @@ def link_citations_ay(cite_runs, entries, blue) -> tuple[int, list[str]]:
             continue
         full = "".join(t for _, t, _ in items)
         spans = []                                          # (start, end, entry number)
+        prev_end, last_name = 0, ""
         for m in CITE_YEAR_RE.finditer(full):
             seg = max(full.rfind(";", 0, m.start()), full.rfind("(", 0, m.start())) + 1
+            same_author = seg < prev_end                    # "(Smith, 2020, 2021)": 2nd year, same author
+            seg = max(seg, prev_end)
             seg_text = full[seg:m.start()]
             lead = len(seg_text) - len(seg_text.lstrip())
             name_text, start = seg_text, seg + lead
-            if not seg_text.strip() and full[:m.start()].strip() in ("", "("):
+            prev_end = m.end()
+            if same_author and not re.sub(r"[\s,]", "", seg_text):
+                name_text, start = last_name, m.start()
+            elif not seg_text.strip() and full[:m.start()].strip() in ("", "("):
                 nm = NARR_RE.search(preceding_text(items[0][0]).rstrip())   # narrative: Name et al. (2022)
                 if nm:
                     name_text, start = nm.group(1), m.start()
+            if name_text.strip():
+                last_name = name_text
             n = ay_lookup(entries, name_text, m.group(1))
             if n is None:
                 if name_text.strip():

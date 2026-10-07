@@ -82,6 +82,14 @@ Refresh and just before exporting the PDF. Running it again is safe.
 To double-check the result, `python verify_links.py paper_linked.docx` confirms every
 link points at the matching reference-list entry.
 
+Limitations: only the document body is processed (citations inside footnotes, headers or
+text boxes are left alone), and an ambiguous author-year match (e.g. two `Smith 2020a`
+entries cited as `Smith 2020`) links to the first one.
+
+## Tests
+`python tests/test_hyperlinks.py` builds small synthetic Zotero documents and checks that
+linking keeps the text intact, links the right entries and is safe to re-run.
+
 ## Examples
 `examples/` holds a small synthetic Word file with typed citations and its converted
 counterpart, for trying the tools without touching your own documents.
