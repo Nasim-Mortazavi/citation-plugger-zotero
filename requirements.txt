@@ -1,0 +1,4 @@
+python-docx
+requests
+# only needed for zotero_linker_selection.py (live Word mode, Windows)
+pywin32; sys_platform == "win32"

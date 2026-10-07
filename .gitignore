@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.claude/
+.env
+# user documents; only the examples/ samples are tracked
+*.docx
+!examples/*.docx
+~$*
